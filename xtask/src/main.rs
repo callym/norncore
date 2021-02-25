@@ -9,6 +9,7 @@ use std::{
 use config::Config;
 
 mod config;
+mod dxwnd;
 
 type DynError = Box<dyn std::error::Error>;
 
@@ -24,11 +25,12 @@ fn try_main() -> Result<(), DynError> {
 
   let task = env::args().nth(1);
 
-  let config = config(env::args().skip(1))?;
+  let config = config(env::args().skip(2))?;
 
   match task.as_deref() {
     Some("build") => build(&config)?,
-    Some("run-wine") => run_wine(&config)?,
+    Some("run") => run(&config)?,
+    Some("debug") => debug(&config)?,
     _ => print_help(),
   }
 
@@ -38,15 +40,30 @@ fn try_main() -> Result<(), DynError> {
 fn print_help() {
   eprintln!(
     "Tasks:
-build      [engine]            bootstraps `norncore`, where `engine` is the path to your Docking Station's `engine.exe`
-run-wine   [engine]            bootstraps then runs `norncore` with `wine`
+build                   [engine]            bootstraps `norncore`, where `engine` is the path to your Docking Station's `engine.exe`
+run     [wine] [dxwnd]  [engine]            bootstraps then runs `norncore` (optionally with `wine` and/or `dxwnd`)
+debug   [wine]          [engine]            bootstraps then runs `norncore` under `x64dbg` (optionally with `wine`)
 "
   )
 }
 
-fn config(mut args: impl Iterator<Item = String>) -> Result<Config, DynError> {
+fn config(args: impl Iterator<Item = String>) -> Result<Config, DynError> {
+  let mut wine = false;
+  let mut dxwnd = false;
+
   let path = args
-    .nth(1)
+    .filter(|arg| match arg.as_ref() {
+      "wine" => {
+        wine = true;
+        false
+      },
+      "dxwnd" => {
+        dxwnd = true;
+        false
+      },
+      _ => true,
+    })
+    .last()
     .or_else(|| std::env::var("NORNCORE_ENGINE").ok());
 
   let path = if let Some(path) = path {
@@ -61,21 +78,46 @@ fn config(mut args: impl Iterator<Item = String>) -> Result<Config, DynError> {
     return Err("No path given.".into());
   };
 
-  let patched = path.with_file_name("engine.exe");
+  let patched_engine = path.with_file_name("engine.exe");
 
-  let path = path.with_file_name("engine.exe.orig");
+  let engine = path.with_file_name("engine.exe.orig");
 
-  Ok(Config::new(path, patched))
+  let mut config = Config::new(engine, patched_engine);
+
+  config.wine = wine;
+  config.dxwnd = dxwnd;
+
+  Ok(config)
 }
 
-fn run_wine(config: &Config) -> Result<(), DynError> {
-  build(config)?;
+fn prepare_command(config: &Config, args: &[String]) -> Result<Command, DynError> {
+  let mut command = if config.wine {
+    let wine = env::var("NORNCORE_WINE_BIN")
+      .map(|p| format!("{}/wine", p))
+      .unwrap_or("wine".into());
 
-  let wine = env::var("NORNCORE_WINE_BIN")
-    .map(|p| format!("{}/wine", p))
-    .unwrap_or("wine".into());
+    let mut command = Command::new(wine);
 
-  let mut command = Command::new(wine);
+    command.args(args);
+
+    if config.dxwnd {
+      command.arg(config.dxwnd_path.as_ref().unwrap());
+    } else {
+      command.arg(&config.patched_engine);
+    }
+
+    command
+  } else {
+    let mut command = if config.dxwnd {
+      Command::new(config.dxwnd_path.as_ref().unwrap())
+    } else {
+      Command::new(config.patched_engine.as_path())
+    };
+
+    command.args(args);
+
+    command
+  };
 
   for (key, value) in std::env::vars() {
     if key.starts_with("NORNCORE_") {
@@ -83,11 +125,35 @@ fn run_wine(config: &Config) -> Result<(), DynError> {
     }
   }
 
-  command
-    .current_dir(config.patched_engine.parent().unwrap())
-    .arg(&config.patched_engine)
-    .spawn()?
-    .wait()?;
+  if config.dxwnd {
+    command.arg(format!("/r:{}", dxwnd::find_index(config)?));
+    command.current_dir(config.dxwnd_path.as_ref().unwrap().parent().unwrap());
+  }
+
+  if !config.dxwnd {
+    command.current_dir(config.patched_engine.parent().unwrap());
+  }
+
+  Ok(command)
+}
+
+fn debug(config: &Config) -> Result<(), DynError> {
+  build(config)?;
+
+  let dbg = env::var("X64DBG_PATH")?;
+
+  let mut config = config.clone();
+  config.dxwnd = false;
+
+  prepare_command(&config, &[dbg])?.spawn()?.wait()?;
+
+  Ok(())
+}
+
+fn run(config: &Config) -> Result<(), DynError> {
+  build(config)?;
+
+  prepare_command(config, &[])?.spawn()?.wait()?;
 
   Ok(())
 }
