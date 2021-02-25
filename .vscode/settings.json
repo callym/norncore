@@ -1,0 +1,7 @@
+{
+  "rust-analyzer.cargo.target": "i686-pc-windows-msvc",
+  "python.formatting.provider": "autopep8",
+  "[python]": {
+    "editor.tabSize": 4
+  }
+}

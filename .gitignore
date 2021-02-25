@@ -1,0 +1,4 @@
+/target
+
+# Project ignores
+.env
